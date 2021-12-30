@@ -5,6 +5,11 @@ import (
 	"fmt"
 	"time"
 
+	bktv1alpha1 "github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1"
+	bktversioned "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/clientset/versioned"
+	bktexternal "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/informers/externalversions"
+	bktlister "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/listers/objectbucket.io/v1alpha1"
+
 	"github.com/openshift/library-go/pkg/controller/controllercmd"
 	"github.com/openshift/library-go/pkg/operator/events"
 	"github.com/openshift/library-go/pkg/operator/resource/resourceapply"
@@ -75,6 +80,12 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 	}
 	hubKubeInformerFactory := informers.NewSharedInformerFactoryWithOptions(hubKubeClient, 10*time.Minute, informers.WithNamespace(o.SpokeClusterName))
 
+	customClient, err := bktversioned.NewForConfig(controllerContext.KubeConfig)
+	if err != nil {
+		return err
+	}
+	customFactory := bktexternal.NewSharedInformerFactoryWithOptions(customClient, 10*time.Minute)
+
 	greenSecretAgent := newgreenSecretTokenExchangeAgentController(
 		hubKubeClient,
 		hubKubeInformerFactory.Core().V1().Secrets(),
@@ -93,6 +104,7 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 		o.SpokeClusterName,
 		controllerContext.EventRecorder,
 		controllerContext.KubeConfig,
+		customFactory.Objectbucket().V1alpha1().ObjectBucketClaims(),
 	)
 
 	leaseUpdater := lease.NewLeaseUpdater(
@@ -103,6 +115,7 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 
 	go hubKubeInformerFactory.Start(ctx.Done())
 	go spokeKubeInformerFactory.Start(ctx.Done())
+	go customFactory.Start(ctx.Done())
 	go greenSecretAgent.Run(ctx, 1)
 	go blueSecretAgent.Run(ctx, 1)
 	go leaseUpdater.Start(ctx)
@@ -113,6 +126,17 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 
 func getSecret(lister corev1lister.SecretLister, name, namespace string) (*corev1.Secret, error) {
 	se, err := lister.Secrets(namespace).Get(name)
+	switch {
+	case errors.IsNotFound(err):
+		return nil, err
+	case err != nil:
+		return nil, err
+	}
+	return se, nil
+}
+
+func getBucket(lister bktlister.ObjectBucketClaimLister, name, namespace string) (*bktv1alpha1.ObjectBucketClaim, error) {
+	se, err := lister.ObjectBucketClaims(namespace).Get(name)
 	switch {
 	case errors.IsNotFound(err):
 		return nil, err

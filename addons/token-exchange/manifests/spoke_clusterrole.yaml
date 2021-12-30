@@ -15,3 +15,6 @@ rules:
 - apiGroups: ["ocs.openshift.io"]
   resources: ["storageclusters"]
   verbs: ["get", "update"]
+- apiGroups: ["objectbucket.io"]
+  resources: ["objectbucketclaims"]
+  verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]

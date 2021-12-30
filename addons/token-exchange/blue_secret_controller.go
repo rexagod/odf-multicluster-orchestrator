@@ -7,6 +7,9 @@ import (
 	"os"
 	"strings"
 
+	bktv1alpha1 "github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1"
+	bktinformer "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/informers/externalversions/objectbucket.io/v1alpha1"
+	bktlister "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/listers/objectbucket.io/v1alpha1"
 	"github.com/openshift/library-go/pkg/controller/factory"
 	"github.com/openshift/library-go/pkg/operator/events"
 	"github.com/red-hat-storage/odf-multicluster-orchestrator/controllers/common"
@@ -39,6 +42,7 @@ type blueSecretTokenExchangeAgentController struct {
 	clusterName       string
 	recorder          events.Recorder
 	spokeKubeConfig   *rest.Config
+	spokeBucketLister bktlister.ObjectBucketClaimLister
 }
 
 func newblueSecretTokenExchangeAgentController(
@@ -49,6 +53,7 @@ func newblueSecretTokenExchangeAgentController(
 	clusterName string,
 	recorder events.Recorder,
 	spokeKubeConfig *rest.Config,
+	spokeBucketInformers bktinformer.ObjectBucketClaimInformer,
 ) factory.Controller {
 	c := &blueSecretTokenExchangeAgentController{
 		hubKubeClient:     hubKubeClient,
@@ -58,6 +63,7 @@ func newblueSecretTokenExchangeAgentController(
 		clusterName:       clusterName,
 		recorder:          recorder,
 		spokeKubeConfig:   spokeKubeConfig,
+		spokeBucketLister: spokeBucketInformers.Lister(),
 	}
 	klog.Infof("creating managed cluster to hub secret sync controller")
 
@@ -80,11 +86,16 @@ func newblueSecretTokenExchangeAgentController(
 				return true
 			}
 		}
+		if obc, ok := obj.(*bktv1alpha1.ObjectBucketClaim); ok {
+			if obc.Name == "odrbucket" {
+				return true
+			}
+		}
 		return false
 	}
 
 	return factory.New().
-		WithFilteredEventsInformersQueueKeyFunc(queueKeyFn, eventFilterFn, spokeSecretInformers.Informer()).
+		WithFilteredEventsInformersQueueKeyFunc(queueKeyFn, eventFilterFn, spokeSecretInformers.Informer(), spokeBucketInformers.Informer()).
 		WithSync(c.sync).
 		ToController(fmt.Sprintf("managedcluster-secret-%s-controller", TokenExchangeName), recorder)
 }
@@ -98,6 +109,16 @@ func (c *blueSecretTokenExchangeAgentController) sync(ctx context.Context, syncC
 	if err != nil {
 		// ignore secret whose key is not in format: namespace/name
 		return nil
+	}
+
+	bucket, err := getBucket(c.spokeBucketLister, name, namespace)
+	if err == nil {
+		if bucket.Name == "odrbucket" {
+			klog.Infof("***********Working**********************")
+		}
+		return nil
+	} else {
+		klog.Infof(" ")
 	}
 
 	secret, err := getSecret(c.spokeSecretLister, name, namespace)
