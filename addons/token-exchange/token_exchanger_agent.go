@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	bktv1alpha1 "github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1"
+	noobaav1alpha1 "github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1"
 	bktversioned "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/clientset/versioned"
 	bktexternal "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/informers/externalversions"
-	bktlister "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/listers/objectbucket.io/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openshift/library-go/pkg/controller/controllercmd"
 	"github.com/openshift/library-go/pkg/operator/events"
@@ -16,6 +16,9 @@ import (
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -96,6 +99,51 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 		controllerContext.EventRecorder,
 	)
 
+	klog.Info("Registering DR OBC with scheme")
+	newScheme := runtime.NewScheme()
+	// add obc apis to scheme
+	if err := noobaav1alpha1.AddToScheme(newScheme); err != nil {
+		return err
+	}
+	// add core apis to scheme
+	if err := corev1.AddToScheme(newScheme); err != nil {
+		return err
+	}
+
+	// create custom client from new scheme
+	cl, err := client.New(controllerContext.KubeConfig, client.Options{Scheme: newScheme})
+	if err != nil {
+		klog.ErrorS(err, "cannot create custom client")
+	}
+
+	// one time namespace and buckets creation
+	// global bucket namespace
+	bucketNamespace := &corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "namespace",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "openshift-dr-system",
+		},
+	}
+
+	// global bucket
+	noobaaOBC := &noobaav1alpha1.ObjectBucketClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "odrbucket",
+			Namespace:    "openshift-dr-system",
+			Finalizers:   []string{"prevent-ob-deletion"},
+		},
+		Spec: noobaav1alpha1.ObjectBucketClaimSpec{
+			StorageClassName: "openshift-storage.noobaa.io", // default storage class
+		},
+	}
+
+	err = ensurebucketCreated(ctx, cl, bucketNamespace, noobaaOBC)
+	if err != nil {
+		klog.ErrorS(err, "cannot create bucket")
+	}
+
 	blueSecretAgent := newblueSecretTokenExchangeAgentController(
 		hubKubeClient,
 		hubKubeInformerFactory.Core().V1().Secrets(),
@@ -105,6 +153,9 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 		controllerContext.EventRecorder,
 		controllerContext.KubeConfig,
 		customFactory.Objectbucket().V1alpha1().ObjectBucketClaims(),
+		cl,
+		bucketNamespace,
+		noobaaOBC,
 	)
 
 	leaseUpdater := lease.NewLeaseUpdater(
@@ -124,19 +175,42 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 	return nil
 }
 
-func getSecret(lister corev1lister.SecretLister, name, namespace string) (*corev1.Secret, error) {
-	se, err := lister.Secrets(namespace).Get(name)
-	switch {
-	case errors.IsNotFound(err):
-		return nil, err
-	case err != nil:
-		return nil, err
+func ensurebucketCreated(ctx context.Context, cl client.Client, bucketNamespace *corev1.Namespace, noobaaOBC *noobaav1alpha1.ObjectBucketClaim) error {
+	// check if global namespace exists
+	err := cl.Get(ctx, types.NamespacedName{
+		Name: "openshift-dr-system",
+	}, bucketNamespace)
+	if err != nil {
+		klog.ErrorS(err, "")
+		if errors.IsNotFound(err) {
+			klog.Info("Creating namespace openshift-dr-system")
+			err = cl.Create(ctx, bucketNamespace)
+			if err != nil {
+				klog.ErrorS(err, "")
+			}
+		}
 	}
-	return se, nil
+
+	// check if global bucket exists
+	err = cl.Get(ctx, types.NamespacedName{
+		Name:      "odrbucket",
+		Namespace: "openshift-dr-system",
+	}, noobaaOBC)
+	if err != nil {
+		klog.ErrorS(err, "")
+		if errors.IsNotFound(err) {
+			klog.Info("Creating bucket")
+			err = cl.Create(ctx, noobaaOBC)
+			if err != nil {
+				klog.ErrorS(err, "")
+			}
+		}
+	}
+	return err
 }
 
-func getBucket(lister bktlister.ObjectBucketClaimLister, name, namespace string) (*bktv1alpha1.ObjectBucketClaim, error) {
-	se, err := lister.ObjectBucketClaims(namespace).Get(name)
+func getSecret(lister corev1lister.SecretLister, name, namespace string) (*corev1.Secret, error) {
+	se, err := lister.Secrets(namespace).Get(name)
 	switch {
 	case errors.IsNotFound(err):
 		return nil, err

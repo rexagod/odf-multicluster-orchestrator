@@ -2,21 +2,21 @@ package addons
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 
-	bktv1alpha1 "github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/davecgh/go-spew/spew"
+	noobaav1alpha1 "github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1"
 	bktinformer "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/informers/externalversions/objectbucket.io/v1alpha1"
 	bktlister "github.com/kube-object-storage/lib-bucket-provisioner/pkg/client/listers/objectbucket.io/v1alpha1"
 	"github.com/openshift/library-go/pkg/controller/factory"
 	"github.com/openshift/library-go/pkg/operator/events"
-	"github.com/red-hat-storage/odf-multicluster-orchestrator/controllers/common"
-	rookclient "github.com/rook/rook/pkg/client/clientset/versioned"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	corev1informers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	corev1lister "k8s.io/client-go/listers/core/v1"
@@ -43,6 +43,9 @@ type blueSecretTokenExchangeAgentController struct {
 	recorder          events.Recorder
 	spokeKubeConfig   *rest.Config
 	spokeBucketLister bktlister.ObjectBucketClaimLister
+	customClient      client.Client
+	bucketNamespace   *corev1.Namespace
+	noobaaOBC         *noobaav1alpha1.ObjectBucketClaim
 }
 
 func newblueSecretTokenExchangeAgentController(
@@ -54,6 +57,9 @@ func newblueSecretTokenExchangeAgentController(
 	recorder events.Recorder,
 	spokeKubeConfig *rest.Config,
 	spokeBucketInformers bktinformer.ObjectBucketClaimInformer,
+	customClient client.Client,
+	bucketNamespace *corev1.Namespace,
+	noobaaOBC *noobaav1alpha1.ObjectBucketClaim,
 ) factory.Controller {
 	c := &blueSecretTokenExchangeAgentController{
 		hubKubeClient:     hubKubeClient,
@@ -64,6 +70,9 @@ func newblueSecretTokenExchangeAgentController(
 		recorder:          recorder,
 		spokeKubeConfig:   spokeKubeConfig,
 		spokeBucketLister: spokeBucketInformers.Lister(),
+		customClient:      customClient,
+		bucketNamespace:   bucketNamespace,
+		noobaaOBC:         noobaaOBC,
 	}
 	klog.Infof("creating managed cluster to hub secret sync controller")
 
@@ -81,13 +90,15 @@ func newblueSecretTokenExchangeAgentController(
 	}
 
 	eventFilterFn := func(obj interface{}) bool {
-		if s, ok := obj.(*corev1.Secret); ok {
-			if s.Type == RookType && strings.Contains(s.ObjectMeta.Name, blueSecretMatchString) {
-				return true
-			}
-		}
-		if obc, ok := obj.(*bktv1alpha1.ObjectBucketClaim); ok {
-			if obc.Name == "odrbucket" {
+		if obc, ok := obj.(*noobaav1alpha1.ObjectBucketClaim); ok {
+			spew.Dump(obc)
+			if obc.ObjectMeta.GenerateName == "odrbucket" && obc.ObjectMeta.DeletionTimestamp != nil {
+				cl := c.customClient
+				err := cl.Patch(context.TODO(), c.noobaaOBC, client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`)))
+				if err != nil {
+					klog.Errorf("failed to remove finalizer from noobaa obc: %v", err)
+					return false
+				}
 				return true
 			}
 		}
@@ -95,7 +106,7 @@ func newblueSecretTokenExchangeAgentController(
 	}
 
 	return factory.New().
-		WithFilteredEventsInformersQueueKeyFunc(queueKeyFn, eventFilterFn, spokeSecretInformers.Informer(), spokeBucketInformers.Informer()).
+		WithFilteredEventsInformersQueueKeyFunc(queueKeyFn, eventFilterFn, spokeBucketInformers.Informer()).
 		WithSync(c.sync).
 		ToController(fmt.Sprintf("managedcluster-secret-%s-controller", TokenExchangeName), recorder)
 }
@@ -105,105 +116,32 @@ func (c *blueSecretTokenExchangeAgentController) sync(ctx context.Context, syncC
 	key := syncCtx.QueueKey()
 	klog.Infof("reconciling addon deploy %q", key)
 
-	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	// global bucket namespace
+	c.bucketNamespace = &corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "namespace",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "openshift-dr-system",
+		},
+	}
+
+	// global bucket
+	c.noobaaOBC = &noobaav1alpha1.ObjectBucketClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "odrbucket",
+			Namespace:    "openshift-dr-system",
+			Finalizers:   []string{"prevent-ob-deletion"},
+		},
+		Spec: noobaav1alpha1.ObjectBucketClaimSpec{
+			StorageClassName: "openshift-storage.noobaa.io", // default storage class
+		},
+	}
+
+	err := ensurebucketCreated(ctx, c.customClient, c.bucketNamespace, c.noobaaOBC)
 	if err != nil {
-		// ignore secret whose key is not in format: namespace/name
-		return nil
+		return err
 	}
-
-	bucket, err := getBucket(c.spokeBucketLister, name, namespace)
-	if err == nil {
-		if bucket.Name == "odrbucket" {
-			klog.Infof("***********Working**********************")
-		}
-		return nil
-	} else {
-		klog.Infof(" ")
-	}
-
-	secret, err := getSecret(c.spokeSecretLister, name, namespace)
-	if err != nil {
-		return fmt.Errorf("failed to get the secret %q in namespace %q in managed cluster. Error %v", name, namespace, err)
-	}
-
-	sc, err := c.getStorageClusterFromRookSecret(secret)
-	if err != nil {
-		return fmt.Errorf("failed to get the storage cluster name from the sercet %q in namespace %q in managed cluster. Error %v", name, namespace, err)
-	}
-
-	newSecret, err := createBlueSecret(secret, sc, c.clusterName)
-	if err != nil {
-		return fmt.Errorf("failed to create secret from the managed cluster secret %q from namespace %v for the hub cluster in namespace %q err: %v", secret.Name, secret.Namespace, c.clusterName, err)
-	}
-
-	err = createSecret(c.hubKubeClient, c.recorder, &newSecret)
-	if err != nil {
-		return fmt.Errorf("failed to sync managed cluster secret %q from namespace %v to the hub cluster in namespace %q err: %v", secret.Name, secret.Namespace, c.clusterName, err)
-	}
-
-	klog.Infof("successfully synced managed cluster secret %q from namespace %v to the hub cluster in namespace %q", secret.Name, secret.Namespace, c.clusterName)
 
 	return nil
-}
-
-func (c *blueSecretTokenExchangeAgentController) getStorageClusterFromRookSecret(secret *corev1.Secret) (storageCluster string, err error) {
-	for _, v := range secret.ObjectMeta.OwnerReferences {
-		if v.Kind != "CephCluster" {
-			continue
-		}
-
-		rclient, err := rookclient.NewForConfig(c.spokeKubeConfig)
-		if err != nil {
-			return "", fmt.Errorf("unable to create a rook client err: %v", err)
-		}
-
-		found, err := rclient.CephV1().CephClusters(secret.Namespace).Get(context.TODO(), v.Name, metav1.GetOptions{})
-		if err != nil {
-			return "", fmt.Errorf("unable to fetch ceph cluster err: %v", err)
-		}
-
-		for _, owner := range found.ObjectMeta.OwnerReferences {
-			if owner.Kind != "StorageCluster" {
-				continue
-			}
-			storageCluster = owner.Name
-		}
-
-		if storageCluster != "" {
-			break
-		}
-	}
-
-	if storageCluster == "" {
-		return storageCluster, fmt.Errorf("could not get storageCluster name")
-	}
-	return storageCluster, nil
-}
-
-func createBlueSecret(secret *corev1.Secret, storageCluster string, managedCluster string) (nsecret corev1.Secret, err error) {
-	if secret == nil {
-		return nsecret, fmt.Errorf("cannot create secret on the hub, source secret nil")
-	}
-
-	secretData, err := json.Marshal(secret.Data)
-	if err != nil {
-		return nsecret, fmt.Errorf("cannot create secret on the hub, marshalling failed")
-	}
-
-	nSecret := corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      common.CreateUniqueSecretName(managedCluster, secret.Namespace, storageCluster),
-			Namespace: managedCluster,
-			Labels: map[string]string{
-				common.SecretLabelTypeKey: string(common.SourceLabel),
-			},
-		},
-		Type: common.SecretLabelTypeKey,
-		Data: map[string][]byte{
-			common.SecretDataKey:         secretData,
-			common.NamespaceKey:          []byte(secret.Namespace),
-			common.StorageClusterNameKey: []byte(storageCluster),
-		},
-	}
-	return nSecret, nil
 }

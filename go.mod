@@ -3,12 +3,12 @@ module github.com/red-hat-storage/odf-multicluster-orchestrator
 go 1.16
 
 require (
+	github.com/davecgh/go-spew v1.1.1
 	github.com/kube-object-storage/lib-bucket-provisioner v0.0.0-20210311161930-4bea5edaff58
 	github.com/onsi/ginkgo v1.16.4
 	github.com/onsi/gomega v1.14.0
 	github.com/openshift/library-go v0.0.0-20210727084322-8a96c0a97c06
 	github.com/openshift/ocs-operator v0.0.1-alpha2
-	github.com/rook/rook v1.7.0
 	github.com/spf13/cobra v1.1.3
 	github.com/stretchr/testify v1.7.0
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
