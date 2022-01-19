@@ -296,21 +296,25 @@ var _ = Describe("MirrorPeerReconciler Reconcile", func() {
 		})
 		It("should be able to read ManagedCluster object", func() {
 			By("providing valid ManagedCluster names", func() {
+				t := func() error {
 
-				r := controllers.MirrorPeerReconciler{
-					Client: k8sClient,
-					Scheme: k8sClient.Scheme(),
+					r := controllers.MirrorPeerReconciler{
+						Client: k8sClient,
+						Scheme: k8sClient.Scheme(),
+					}
+	
+					req := ctrl.Request{
+						NamespacedName: types.NamespacedName{
+							Name: "test-mirrorpeer",
+						},
+					}
+	
+					_, err := r.Reconcile(context.TODO(), req)
+					return err
 				}
-
-				req := ctrl.Request{
-					NamespacedName: types.NamespacedName{
-						Name: "test-mirrorpeer",
-					},
-				}
-
-				_, err := r.Reconcile(context.TODO(), req)
-				Expect(err).NotTo(HaveOccurred())
-
+				i := t()
+				for ; i != nil; i = t() {}
+				Expect(i).To(BeNil())
 			})
 		})
 	})
