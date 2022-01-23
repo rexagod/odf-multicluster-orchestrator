@@ -13,6 +13,7 @@ defaults:
   run:
     shell: bash
 
+jobs:
   integration-stress-test:
     name: Integration tests stress testing
     needs: integration-test

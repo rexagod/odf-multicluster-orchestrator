@@ -51,6 +51,7 @@ var (
 			Name: "cluster2",
 		},
 	}
+
 	mirrorPeer1LookupKey = types.NamespacedName{Namespace: mirrorPeer1.Namespace, Name: mirrorPeer1.Name}
 	mcAddOn1LookupKey    = types.NamespacedName{Namespace: "cluster1", Name: tokenexchange.TokenExchangeName}
 	mcAddOn2LookupKey    = types.NamespacedName{Namespace: "cluster2", Name: tokenexchange.TokenExchangeName}
