@@ -1,0 +1,31 @@
+name: Integration stress test
+
+on:
+  pull_request:
+    branches: [ '*' ]
+    paths:
+      - 'tests/integration/**'
+
+env:
+  GO_VERSION: "1.16"
+
+defaults:
+  run:
+    shell: bash
+
+  integration-stress-test:
+    name: Integration tests stress testing
+    needs: integration-test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v2
+
+    - name: Setup go
+      uses: actions/setup-go@v2
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Run integration stress test
+      run: for i in {1..25}; do make test; done
+
